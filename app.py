@@ -30,7 +30,7 @@ def sanitize_title(title: str) -> str:
 
 def build_stream_url(direct_url: str, filename: str, media_type: str) -> str:
     encoded_url = quote(direct_url, safe='')
-    return f"http://127.0.0.1:8000/stream?download_url={encoded_url}&filename={filename}&media_type={media_type}"
+    return f"https://down-load.onrender.com/stream?download_url={encoded_url}&filename={filename}&media_type={media_type}"
 
 
 def get_best_audio(formats: list) -> dict:
@@ -48,6 +48,10 @@ def get_best_audio(formats: list) -> dict:
         ]
     return audio_formats[-1] if audio_formats else formats[-1]
 
+
+@app.get("/")
+def home():
+    return {"status": "running"}
 
 @app.get("/stream")
 async def stream_download(download_url: str, filename: str = "audio.m4a", media_type: str = "audio/mp4"):
