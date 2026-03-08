@@ -177,53 +177,111 @@ async def handle_instagram(url: str, output_format: str):
 
 
 async def handle_youtube(url: str, quality: str, output_format: str):
-    quality_formats = {
-        "best":  "best[ext=mp4][vcodec!=none][acodec!=none]/best[ext=mp4]/best",
-        "1080p": "best[ext=mp4][height<=1080][vcodec!=none][acodec!=none]/best[height<=1080]/best",
-        "720p":  "best[ext=mp4][height<=720][vcodec!=none][acodec!=none]/best[height<=720]/best",
-        "480p":  "best[ext=mp4][height<=480][vcodec!=none][acodec!=none]/best[height<=480]/best",
-        "360p":  "best[ext=mp4][height<=360][vcodec!=none][acodec!=none]/best[height<=360]/best",
+    quality_map = {
+        "best": None, "1080p": 1080,
+        "720p": 720, "480p": 480, "360p": 360,
     }
 
-    if output_format == "audio":
-        ydl_opts = {
-            **get_yt_dlp_opts_base(),
-            'format': 'bestaudio[ext=m4a]/bestaudio[ext=mp3]/bestaudio',
-            'prefer_free_formats': False,
-        }
-    else:
-        if quality not in quality_formats:
-            raise HTTPException(status_code=400, detail=f"Invalid quality. Choose from: {', '.join(quality_formats.keys())}")
-        ydl_opts = {
-            **get_yt_dlp_opts_base(),
-            'format': quality_formats[quality],
-        }
+    if quality not in quality_map:
+        raise HTTPException(status_code=400, detail=f"Invalid quality. Choose from: {', '.join(quality_map.keys())}")
+
+    height = quality_map[quality]
+
+    # NO format filter — fetch ALL formats, pick manually
+    ydl_opts = {
+        **get_yt_dlp_opts_base(),
+        'format': 'bestaudio/best' if output_format == "audio" else 'worstvideo',
+    }
 
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        info = ydl.extract_info(url, download=False)
-        title = sanitize_title(info.get('title') or "video")
+        # only extract info — no format filter crash
+        info = ydl.sanitize_info(
+            ydl.extract_info(url, download=False, process=False)
+        )
+        # process without format selection
+        info = ydl.process_ie_result(info, download=False)
 
-        if output_format == "audio":
-            formats = info.get('formats', [])
-            best_audio = get_best_audio(formats)
-            ext = best_audio.get('ext', 'm4a')
-            return {
-                "title": title,
-                "thumbnail": info.get('thumbnail'),
-                "duration": info.get('duration'),
-                "source": "youtube",
-                "output_format": ext,
-                "download_url": best_audio.get('url'),
-                "stream_url": build_stream_url(best_audio.get('url'), f"{title}.{ext}", "audio/mp4"),
-            }
-        else:
-            return {
-                "title": title,
-                "thumbnail": info.get('thumbnail'),
-                "duration": info.get('duration'),
-                "resolution": f"{info.get('width')}x{info.get('height')}",
-                "source": "youtube",
-                "output_format": "mp4",
-                "download_url": info.get('url'),
-                "stream_url": build_stream_url(info.get('url'), f"{title}.mp4", "video/mp4"),
-            }
+    # now pick format manually from all available
+    formats = info.get('formats', [])
+    title = sanitize_title(info.get('title') or "video")
+
+    if output_format == "audio":
+        # pick best audio only format
+        audio_formats = [
+            f for f in formats
+            if f.get('acodec') not in (None, 'none')
+            and f.get('vcodec') in (None, 'none')
+            and f.get('url')
+        ]
+        if not audio_formats:
+            # fallback — any format with audio
+            audio_formats = [
+                f for f in formats
+                if f.get('acodec') not in (None, 'none')
+                and f.get('url')
+            ]
+        if not audio_formats:
+            audio_formats = [f for f in formats if f.get('url')]
+
+        if not audio_formats:
+            raise HTTPException(status_code=400, detail="No audio format found")
+
+        # sort by bitrate — pick highest
+        audio_formats.sort(key=lambda f: f.get('abr') or f.get('tbr') or 0)
+        best = audio_formats[-1]
+        ext = best.get('ext', 'm4a')
+        return {
+            "title": title,
+            "thumbnail": info.get('thumbnail'),
+            "duration": info.get('duration'),
+            "source": "youtube",
+            "output_format": ext,
+            "download_url": best.get('url'),
+            "stream_url": build_stream_url(best.get('url'), f"{title}.{ext}", "audio/mp4"),
+        }
+
+    else:
+        # pick progressive format (video+audio in one file — no ffmpeg needed)
+        progressive = [
+            f for f in formats
+            if f.get('vcodec') not in (None, 'none')
+            and f.get('acodec') not in (None, 'none')
+            and f.get('url')
+            and (height is None or (f.get('height') or 0) <= height)
+        ]
+        # fallback — progressive any height
+        if not progressive:
+            progressive = [
+                f for f in formats
+                if f.get('vcodec') not in (None, 'none')
+                and f.get('acodec') not in (None, 'none')
+                and f.get('url')
+            ]
+        # fallback — any video
+        if not progressive:
+            progressive = [
+                f for f in formats
+                if f.get('vcodec') not in (None, 'none')
+                and f.get('url')
+            ]
+        # last fallback
+        if not progressive:
+            progressive = [f for f in formats if f.get('url')]
+
+        if not progressive:
+            raise HTTPException(status_code=400, detail="No video format found")
+
+        # sort by height — pick best
+        progressive.sort(key=lambda f: f.get('height') or 0)
+        best = progressive[-1]
+
+        return {
+            "title": title,
+            "thumbnail": info.get('thumbnail'),
+            "duration": info.get('duration'),
+            "resolution": f"{best.get('width')}x{best.get('height')}",
+            "source": "youtube",
+            "output_format": best.get('ext', 'mp4'),
+            "download_url": best.get('url'),
+            "stream_url": build_stream_url(best.get('url'), f"{title}.mp4", "video/mp4"),
+        }
