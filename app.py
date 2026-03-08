@@ -9,6 +9,12 @@ import traceback
 app = FastAPI()
 
 
+def extract_youtube_id(url: str) -> str:
+    pattern = r'(?:youtube\.com/watch\?v=|youtu\.be/|youtube\.com/shorts/)([a-zA-Z0-9_-]{11})'
+    match = re.search(pattern, url)
+    return match.group(1) if match else url
+
+
 def is_youtube(url: str) -> bool:
     return "youtube.com" in url or "youtu.be" in url
 
@@ -127,7 +133,10 @@ async def handle_youtube(url: str, output_format: str):
         audio_data = format_options.get('audio', {}).get('mp3')
 
         if not audio_data or audio_data is False or not isinstance(audio_data, dict) or not audio_data.get('url'):
-            raise HTTPException(status_code=400, detail="Audio is not available for this video")
+            raise HTTPException(status_code=400, detail={
+                "message": "Audio is not available for this video",
+                "videoId": extract_youtube_id(url),
+            })
 
         return {
             "title": title,
