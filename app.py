@@ -1,6 +1,5 @@
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import StreamingResponse
-import yt_dlp
 import re
 import httpx
 from urllib.parse import quote
@@ -28,77 +27,20 @@ def build_stream_url(direct_url: str, filename: str, media_type: str) -> str:
     return f"{base_url}/stream?download_url={encoded_url}&filename={filename}&media_type={media_type}"
 
 
-def get_best_audio(formats: list) -> dict:
-    audio_formats = [
-        f for f in formats
-        if f.get('acodec') != 'none'
-        and f.get('vcodec') == 'none'
-        and f.get('ext') in ['m4a', 'mp3']
-    ]
-    if not audio_formats:
-        audio_formats = [
-            f for f in formats
-            if f.get('acodec') != 'none'
-            and f.get('vcodec') == 'none'
-        ]
-    return audio_formats[-1] if audio_formats else formats[-1]
-
-
-def get_cookies_file() -> str | None:
-    """read cookies from environment variable and save to temp file"""
-    cookies_content = os.environ.get('YOUTUBE_COOKIES')
-    if not cookies_content:
-        return None
-    cookies_path = '/tmp/yt_cookies.txt'
-    with open(cookies_path, 'w') as f:
-        f.write(cookies_content)
-    return cookies_path
-
-
-def get_yt_dlp_opts_base() -> dict:
-    """base yt-dlp options with cookies if available"""
-    opts = {
-        'quiet': True,
-        'no_warnings': True,
-    }
-    cookies_file = get_cookies_file()
-    if cookies_file:
-        opts['cookiefile'] = cookies_file
-    return opts
-
-
 @app.get("/")
 def home():
-    cookies_available = bool(os.environ.get('YOUTUBE_COOKIES'))
-    return {
-        "status": "running",
-        "cookies": "available ✅" if cookies_available else "not set ❌",
-    }
+    return {"status": "running"}
 
 
 @app.get("/stream")
-async def stream_download(download_url: str, filename: str = "audio.m4a", media_type: str = "audio/mp4"):
+async def stream_download(download_url: str, filename: str = "video.mp4", media_type: str = "video/mp4"):
     async def stream_file():
-        is_youtube_url = "googlevideo.com" in download_url or "youtube.com" in download_url
         headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Referer": "https://www.instagram.com/",
+            "Origin": "https://www.instagram.com",
         }
-        if is_youtube_url:
-            headers.update({
-                "Referer": "https://www.youtube.com/",
-                "Origin": "https://www.youtube.com",
-            })
-        else:
-            headers.update({
-                "Referer": "https://www.instagram.com/",
-                "Origin": "https://www.instagram.com",
-            })
-
-        async with httpx.AsyncClient(
-            timeout=300.0,
-            follow_redirects=True,
-            headers=headers,
-        ) as client:
+        async with httpx.AsyncClient(timeout=300.0, follow_redirects=True, headers=headers) as client:
             async with client.stream("GET", download_url) as response:
                 if response.status_code not in [200, 206]:
                     raise HTTPException(status_code=400, detail=f"Failed to fetch file: {response.status_code}")
@@ -108,26 +50,23 @@ async def stream_download(download_url: str, filename: str = "audio.m4a", media_
     return StreamingResponse(
         stream_file(),
         media_type=media_type,
-        headers={
-            "Content-Disposition": f'attachment; filename="{filename}"',
-            "Accept-Ranges": "bytes",
-        }
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
 
 
 @app.get("/download")
-async def download(url: str, quality: str = "720p", output_format: str = "video"):
+async def download(url: str, output_format: str = "video"):
     try:
         if output_format not in ["video", "audio"]:
             raise HTTPException(status_code=400, detail="Invalid output_format. Choose from: video, audio")
 
         if not is_youtube(url) and not is_instagram(url):
-            raise HTTPException(status_code=400, detail="Invalid URL. Only YouTube and Instagram URLs are supported")
+            raise HTTPException(status_code=400, detail="Only YouTube and Instagram URLs are supported")
 
         if is_instagram(url):
             return await handle_instagram(url, output_format)
 
-        return await handle_youtube(url, quality, output_format)
+        return await handle_youtube(url, output_format)
 
     except HTTPException:
         raise
@@ -136,31 +75,25 @@ async def download(url: str, quality: str = "720p", output_format: str = "video"
 
 
 async def handle_instagram(url: str, output_format: str):
+    import yt_dlp
     if output_format == "audio":
-        ydl_opts = {
-            **get_yt_dlp_opts_base(),
-            'format': 'bestaudio[ext=m4a]/bestaudio',
-            'prefer_free_formats': False,
-        }
+        ydl_opts = {'quiet': True, 'no_warnings': True, 'format': 'bestaudio[ext=m4a]/bestaudio'}
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=False)
             formats = info.get('formats', [])
-            best_audio = get_best_audio(formats)
+            best = next((f for f in reversed(formats) if f.get('acodec') != 'none' and f.get('vcodec') == 'none'), formats[-1])
             title = sanitize_title(info.get('title') or "instagram_audio")
             return {
                 "title": title,
                 "thumbnail": info.get('thumbnail'),
                 "duration": info.get('duration'),
                 "source": "instagram",
-                "output_format": "m4a",
-                "download_url": best_audio.get('url'),
-                "stream_url": build_stream_url(best_audio.get('url'), f"{title}.m4a", "audio/mp4"),
+                "output_format": best.get('ext', 'm4a'),
+                "download_url": best.get('url'),
+                "stream_url": build_stream_url(best.get('url'), f"{title}.{best.get('ext', 'm4a')}", "audio/mp4"),
             }
     else:
-        ydl_opts = {
-            **get_yt_dlp_opts_base(),
-            'format': 'best[ext=mp4]/best',
-        }
+        ydl_opts = {'quiet': True, 'no_warnings': True, 'format': 'best[ext=mp4]/best'}
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=False)
             title = sanitize_title(info.get('title') or "instagram_video")
@@ -176,119 +109,56 @@ async def handle_instagram(url: str, output_format: str):
             }
 
 
-async def handle_youtube(url: str, quality: str, output_format: str):
-    quality_map = {
-        "best": None, "1080p": 1080,
-        "720p": 720, "480p": 480, "360p": 360,
-    }
+async def handle_youtube(url: str, output_format: str):
+    api_url = f"https://ytdl.socialplug.io/api/video-info?url={quote(url, safe='')}"
 
-    if quality not in quality_map:
-        raise HTTPException(status_code=400, detail=f"Invalid quality. Choose from: {', '.join(quality_map.keys())}")
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        response = await client.get(api_url)
+        if response.status_code != 200:
+            raise HTTPException(status_code=400, detail="Failed to fetch video info")
+        data = response.json()
 
-    height = quality_map[quality]
-    info = None
-    formats = []
-
-    # try each format string one by one — stop at first success
-    format_attempts = [
-        'worstvideo+worstaudio/worst',
-        'worstvideo/worst',
-        '17',   # 144p mp4 — almost always available
-        '18',   # 360p mp4 — almost always available
-        '22',   # 720p mp4 — usually available
-        None,   # no format key at all
-    ]
-
-    for fmt in format_attempts:
-        try:
-            opts = {**get_yt_dlp_opts_base()}
-            if fmt is not None:
-                opts['format'] = fmt
-            with yt_dlp.YoutubeDL(opts) as ydl:
-                info = ydl.extract_info(url, download=False)
-                formats = info.get('formats', [])
-                if formats:
-                    break  # got formats — stop trying
-        except Exception:
-            continue  # try next format
-
-    if not info or not formats:
-        raise HTTPException(status_code=400, detail="Could not fetch video info. YouTube may be blocking this server.")
-
-    title = sanitize_title(info.get('title') or "video")
-
-    # filter only real streamable formats — must have url and not be a manifest
-    valid_formats = [
-        f for f in formats
-        if f.get('url')
-        and not f.get('url', '').endswith('.m3u8')
-        and not f.get('url', '').endswith('.mpd')
-        and f.get('protocol') not in ('m3u8', 'm3u8_native', 'http_dash_segments')
-    ]
-
-    if not valid_formats:
-        valid_formats = [f for f in formats if f.get('url')]
+    title = sanitize_title(data.get('title') or "video")
+    thumbnail = data.get('image')
+    duration = int(data.get('lengthSeconds') or 0)
+    format_options = data.get('format_options', {})
 
     if output_format == "audio":
-        # audio only formats
-        audio_formats = [
-            f for f in valid_formats
-            if f.get('acodec') not in (None, 'none')
-            and f.get('vcodec') in (None, 'none')
-        ]
-        if not audio_formats:
-            audio_formats = [
-                f for f in valid_formats
-                if f.get('acodec') not in (None, 'none')
-            ]
-        if not audio_formats:
-            audio_formats = valid_formats
+        audio_data = format_options.get('audio', {}).get('mp3')
 
-        audio_formats.sort(key=lambda f: f.get('abr') or f.get('tbr') or 0)
-        best = audio_formats[-1]
-        ext = best.get('ext', 'm4a')
+        if not audio_data or audio_data is False or not isinstance(audio_data, dict) or not audio_data.get('url'):
+            raise HTTPException(status_code=400, detail="Audio is not available for this video")
+
         return {
             "title": title,
-            "thumbnail": info.get('thumbnail'),
-            "duration": info.get('duration'),
+            "thumbnail": thumbnail,
+            "duration": duration,
             "source": "youtube",
-            "output_format": ext,
-            "download_url": best.get('url'),
-            "stream_url": build_stream_url(best.get('url'), f"{title}.{ext}", "audio/mp4"),
+            "output_format": "mp3",
+            "download_url": audio_data.get('url'),
+            "stream_url": audio_data.get('url'),
         }
 
     else:
-        # progressive formats (video + audio combined)
-        progressive = [
-            f for f in valid_formats
-            if f.get('vcodec') not in (None, 'none')
-            and f.get('acodec') not in (None, 'none')
-            and (height is None or (f.get('height') or 0) <= height)
-        ]
-        if not progressive:
-            progressive = [
-                f for f in valid_formats
-                if f.get('vcodec') not in (None, 'none')
-                and f.get('acodec') not in (None, 'none')
-            ]
-        if not progressive:
-            progressive = [
-                f for f in valid_formats
-                if f.get('vcodec') not in (None, 'none')
-            ]
-        if not progressive:
-            progressive = valid_formats
+        mp4_list = format_options.get('video', {}).get('mp4', [])
 
-        progressive.sort(key=lambda f: f.get('height') or 0)
-        best = progressive[-1]
+        if not mp4_list:
+            raise HTTPException(status_code=400, detail="No video formats available")
+
+        mp4_with_audio = [f for f in mp4_list if f.get('hasAudio') is True]
+
+        if not mp4_with_audio:
+            raise HTTPException(status_code=400, detail="No video with audio available")
+
+        selected = mp4_with_audio[-1]
 
         return {
             "title": title,
-            "thumbnail": info.get('thumbnail'),
-            "duration": info.get('duration'),
-            "resolution": f"{best.get('width')}x{best.get('height')}",
+            "thumbnail": thumbnail,
+            "duration": duration,
+            "resolution": selected.get('quality', 'unknown'),
             "source": "youtube",
-            "output_format": best.get('ext', 'mp4'),
-            "download_url": best.get('url'),
-            "stream_url": build_stream_url(best.get('url'), f"{title}.mp4", "video/mp4"),
+            "output_format": "mp4",
+            "download_url": selected.get('url'),
+            "stream_url": selected.get('url'),
         }
