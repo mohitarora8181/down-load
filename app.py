@@ -187,26 +187,34 @@ async def handle_youtube(url: str, quality: str, output_format: str):
 
     height = quality_map[quality]
 
-    # NO format filter — fetch ALL formats, pick manually
     ydl_opts = {
         **get_yt_dlp_opts_base(),
-        'format': 'bestaudio/best' if output_format == "audio" else 'worstvideo',
     }
 
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        # only extract info — no format filter crash
-        info = ydl.sanitize_info(
-            ydl.extract_info(url, download=False, process=False)
-        )
-        # process without format selection
-        info = ydl.process_ie_result(info, download=False)
+        info = ydl.extract_info(url, download=False, process=False)
+        info = ydl.sanitize_info(info)
 
-    # now pick format manually from all available
     formats = info.get('formats', [])
+
+    if not formats:
+        ydl_opts_fallback = {
+            **get_yt_dlp_opts_base(),
+            'format': 'worstvideo/worst',
+        }
+        try:
+            with yt_dlp.YoutubeDL(ydl_opts_fallback) as ydl:
+                info = ydl.extract_info(url, download=False, process=True)
+                formats = info.get('formats', [])
+        except Exception:
+            pass
+
     title = sanitize_title(info.get('title') or "video")
 
+    if not formats:
+        raise HTTPException(status_code=400, detail="No formats found for this video")
+
     if output_format == "audio":
-        # pick best audio only format
         audio_formats = [
             f for f in formats
             if f.get('acodec') not in (None, 'none')
@@ -214,7 +222,6 @@ async def handle_youtube(url: str, quality: str, output_format: str):
             and f.get('url')
         ]
         if not audio_formats:
-            # fallback — any format with audio
             audio_formats = [
                 f for f in formats
                 if f.get('acodec') not in (None, 'none')
@@ -222,11 +229,9 @@ async def handle_youtube(url: str, quality: str, output_format: str):
             ]
         if not audio_formats:
             audio_formats = [f for f in formats if f.get('url')]
-
         if not audio_formats:
             raise HTTPException(status_code=400, detail="No audio format found")
 
-        # sort by bitrate — pick highest
         audio_formats.sort(key=lambda f: f.get('abr') or f.get('tbr') or 0)
         best = audio_formats[-1]
         ext = best.get('ext', 'm4a')
@@ -241,7 +246,6 @@ async def handle_youtube(url: str, quality: str, output_format: str):
         }
 
     else:
-        # pick progressive format (video+audio in one file — no ffmpeg needed)
         progressive = [
             f for f in formats
             if f.get('vcodec') not in (None, 'none')
@@ -249,7 +253,6 @@ async def handle_youtube(url: str, quality: str, output_format: str):
             and f.get('url')
             and (height is None or (f.get('height') or 0) <= height)
         ]
-        # fallback — progressive any height
         if not progressive:
             progressive = [
                 f for f in formats
@@ -257,21 +260,17 @@ async def handle_youtube(url: str, quality: str, output_format: str):
                 and f.get('acodec') not in (None, 'none')
                 and f.get('url')
             ]
-        # fallback — any video
         if not progressive:
             progressive = [
                 f for f in formats
                 if f.get('vcodec') not in (None, 'none')
                 and f.get('url')
             ]
-        # last fallback
         if not progressive:
             progressive = [f for f in formats if f.get('url')]
-
         if not progressive:
             raise HTTPException(status_code=400, detail="No video format found")
 
-        # sort by height — pick best
         progressive.sort(key=lambda f: f.get('height') or 0)
         best = progressive[-1]
 
