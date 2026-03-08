@@ -186,51 +186,63 @@ async def handle_youtube(url: str, quality: str, output_format: str):
         raise HTTPException(status_code=400, detail=f"Invalid quality. Choose from: {', '.join(quality_map.keys())}")
 
     height = quality_map[quality]
+    info = None
+    formats = []
 
-    ydl_opts = {
-        **get_yt_dlp_opts_base(),
-    }
+    # try each format string one by one — stop at first success
+    format_attempts = [
+        'worstvideo+worstaudio/worst',
+        'worstvideo/worst',
+        '17',   # 144p mp4 — almost always available
+        '18',   # 360p mp4 — almost always available
+        '22',   # 720p mp4 — usually available
+        None,   # no format key at all
+    ]
 
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        info = ydl.extract_info(url, download=False, process=False)
-        info = ydl.sanitize_info(info)
-
-    formats = info.get('formats', [])
-
-    if not formats:
-        ydl_opts_fallback = {
-            **get_yt_dlp_opts_base(),
-            'format': 'worstvideo/worst',
-        }
+    for fmt in format_attempts:
         try:
-            with yt_dlp.YoutubeDL(ydl_opts_fallback) as ydl:
-                info = ydl.extract_info(url, download=False, process=True)
+            opts = {**get_yt_dlp_opts_base()}
+            if fmt is not None:
+                opts['format'] = fmt
+            with yt_dlp.YoutubeDL(opts) as ydl:
+                info = ydl.extract_info(url, download=False)
                 formats = info.get('formats', [])
+                if formats:
+                    break  # got formats — stop trying
         except Exception:
-            pass
+            continue  # try next format
+
+    if not info or not formats:
+        raise HTTPException(status_code=400, detail="Could not fetch video info. YouTube may be blocking this server.")
 
     title = sanitize_title(info.get('title') or "video")
 
-    if not formats:
-        raise HTTPException(status_code=400, detail="No formats found for this video")
+    # filter only real streamable formats — must have url and not be a manifest
+    valid_formats = [
+        f for f in formats
+        if f.get('url')
+        and not f.get('url', '').endswith('.m3u8')
+        and not f.get('url', '').endswith('.mpd')
+        and f.get('protocol') not in ('m3u8', 'm3u8_native', 'http_dash_segments')
+    ]
+
+    if not valid_formats:
+        valid_formats = [f for f in formats if f.get('url')]
 
     if output_format == "audio":
+        # audio only formats
         audio_formats = [
-            f for f in formats
+            f for f in valid_formats
             if f.get('acodec') not in (None, 'none')
             and f.get('vcodec') in (None, 'none')
-            and f.get('url')
         ]
         if not audio_formats:
             audio_formats = [
-                f for f in formats
+                f for f in valid_formats
                 if f.get('acodec') not in (None, 'none')
-                and f.get('url')
             ]
         if not audio_formats:
-            audio_formats = [f for f in formats if f.get('url')]
-        if not audio_formats:
-            raise HTTPException(status_code=400, detail="No audio format found")
+            audio_formats = valid_formats
 
         audio_formats.sort(key=lambda f: f.get('abr') or f.get('tbr') or 0)
         best = audio_formats[-1]
@@ -246,30 +258,26 @@ async def handle_youtube(url: str, quality: str, output_format: str):
         }
 
     else:
+        # progressive formats (video + audio combined)
         progressive = [
-            f for f in formats
+            f for f in valid_formats
             if f.get('vcodec') not in (None, 'none')
             and f.get('acodec') not in (None, 'none')
-            and f.get('url')
             and (height is None or (f.get('height') or 0) <= height)
         ]
         if not progressive:
             progressive = [
-                f for f in formats
+                f for f in valid_formats
                 if f.get('vcodec') not in (None, 'none')
                 and f.get('acodec') not in (None, 'none')
-                and f.get('url')
             ]
         if not progressive:
             progressive = [
-                f for f in formats
+                f for f in valid_formats
                 if f.get('vcodec') not in (None, 'none')
-                and f.get('url')
             ]
         if not progressive:
-            progressive = [f for f in formats if f.get('url')]
-        if not progressive:
-            raise HTTPException(status_code=400, detail="No video format found")
+            progressive = valid_formats
 
         progressive.sort(key=lambda f: f.get('height') or 0)
         best = progressive[-1]
