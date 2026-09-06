@@ -82,8 +82,8 @@ async def download(url: str, output_format: str = "video"):
 
 async def handle_instagram(url: str, output_format: str):
     import yt_dlp
+    ydl_opts = get_instagram_ydl_opts(output_format)
     if output_format == "audio":
-        ydl_opts = {'quiet': True, 'no_warnings': True, 'format': 'bestaudio[ext=m4a]/bestaudio'}
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=False)
             formats = info.get('formats', [])
@@ -99,7 +99,6 @@ async def handle_instagram(url: str, output_format: str):
                 "stream_url": build_stream_url(best.get('url'), f"{title}.{best.get('ext', 'm4a')}", "audio/mp4"),
             }
     else:
-        ydl_opts = {'quiet': True, 'no_warnings': True, 'format': 'best[ext=mp4]/best'}
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=False)
             title = sanitize_title(info.get('title') or "instagram_video")
@@ -113,6 +112,32 @@ async def handle_instagram(url: str, output_format: str):
                 "download_url": info.get('url'),
                 "stream_url": build_stream_url(info.get('url'), f"{title}.mp4", "video/mp4"),
             }
+
+def get_instagram_ydl_opts(output_format: str) -> dict:
+    ydl_opts = {
+        'quiet': True,
+        'no_warnings': True,
+        'http_headers': {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36',
+            'Accept-Language': 'en-US,en;q=0.9',
+        }
+    }
+
+    if os.path.exists("cookies.txt"):
+        ydl_opts['cookiefile'] = "cookies.txt"
+    elif os.environ.get("INSTAGRAM_COOKIES"):
+        cookie_path = "/tmp/cookies.txt" if os.name != 'nt' else "cookies_temp.txt"
+        with open(cookie_path, "w", encoding="utf-8") as f:
+            f.write(os.environ["INSTAGRAM_COOKIES"])
+        ydl_opts['cookiefile'] = cookie_path
+
+    if output_format == "audio":
+        ydl_opts['format'] = 'bestaudio[ext=m4a]/bestaudio'
+    else:
+        ydl_opts['format'] = 'best[ext=mp4]/best'
+
+    return ydl_opts
+
 
 
 async def handle_youtube(url: str, output_format: str):
